@@ -1,0 +1,913 @@
+#! /usr/bin/env bash
+#
+#   Live Vote Count Chart, using Mexico's PREP Data,
+#   for the municipal election in Panuco, Zacatecas, Mexico.
+#
+#
+#   Last used: 20240603
+#   
+#
+#   The script uses:
+#      xvfb
+#      chrome web browser
+#      xdotool
+#      gnu tools
+#      github
+#      www.datawrapper.de
+#      unzip
+#      Xorg Server
+#
+#   The script was executed in Puppy Linux FOSSA
+#
+#   What does it do?
+#
+#       The script downloads the live voting count database for the municipalities in the
+#       Mexican state of Zacatecas, from the database, it extracts the votes
+#       for the Panuco, Zacatecas Municipality, and performs the mathematics 
+#       required to get the total vote count, the voter turn out, and
+#       the vote count by polling place. Finally, since, the database uses numeric
+#       codes to identify the polling places, this script replaces the 
+#       numeric codes with the names of the towns, also, it replaces the
+#       parties names with the name of the candidates. Once the operations
+#       are performed, the newly calculated data is uploaded in the form of
+#       archives to a github repo, where it is then read by a chart previously
+#       creted in www.datawrapper.de
+#
+#                             DEBUGGING
+
+trap 'on_error ; printf "\n" ; s=$?; echo >&2 "$0: Exit code on line "$LINENO": $BASH_COMMAND" ; exit $s ;' ERR
+
+trap 'cleanup' EXIT
+
+# login for datawrapper credentials, which at the end were not needed
+source /root/datawrapper
+
+# login credentials to github
+source /root/git_election_credentials
+
+set -eou pipefail
+#set -x
+
+export LC_ALL=es_MX.utf8
+
+# remove files at exit
+function cleanup(){
+#  set -x  
+  rm -f ".build_headers_with_names"
+  rm -f ".paso_01-Casillas_de_Panuco.csv"
+  rm -f "paso_03_Candidaturas_Reales.csv"
+  rm -f "paso_03_headers"
+  rm -f "paso_01-Casillas_de_Panuco.csv"
+  rm -f "paso_02-Casillas_Con_Localidad.csv"
+
+}
+
+# if there is an error kill xvfb
+function on_error(){
+
+    killall "Xvfb"
+    
+}
+
+
+# The file with the votes does not include the names of the candidates, only the stings of
+# names of the parties, this function replaces the party strings with
+# candidates.
+# 
+function agregar_nombre_de_candidatos(){
+# The Database includes three files, one of those files is a list of the
+# candidates with the party, and municipality they represent, this line
+# uses that file to extract the candidates for the municipality of Panuco,
+# the 32 represents the state of Zacatecas, and the 38 the municipality of
+# Panuco.
+  awk 'BEGIN{FS="," ; OFS="|"} $1==32 && $2==38{$1=$1 ; print $0}' "$1" > "candidaturas_mun.csv"
+
+# We count the number of candidates 
+  numero_de_candidatos="$(wc --lines "candidaturas_mun.csv" | cut -d " " -f1)"
+
+# The two nested for loops replace the parties' names with the names of the candidates
+#    
+  for linea in $(seq 1 "$numero_de_candidatos") ; do
+    # We extract and save the candidates' names into the array
+    candidato=$(awk -v can="@/$linea/" 'BEGIN{FS="|" ; OFS="|"} FNR ~ can {print $4}' "candidaturas_mun.csv")
+    # We extract the parties and save them to an array
+    partido=$(awk -v par="@/$linea/" 'BEGIN{FS="|" ; OFS="|"} FNR ~ par {print $3}' "candidaturas_mun.csv")
+    # We are about to use the IFS to be able to properly replace the party strings 
+    # with the candidates names
+    #  save the IFS
+    old_ifs="$IFS"
+    # set the new IFS to be _ , we do this because the way the Database is structured, and how politics work in mexico,
+    # a candidate can be part of a coalition of parties, in that case the file with the names of the  candidates will use _ as separator
+    # ie, 
+    # John Doe | Party1_Party2_Party3
+    #
+    # And in the Database File with the votes, all the party combinations are listed (also in the ballot), ie,
+    # Party1 | Party2 | Party3 | Party1_Party2 | Party1_party3 | Party2_Pary3
+    #
+    # So what when the function is done executing we have, ie,
+    # John Doe | John Doe | John Doe | John Doe | John Doe | John Doe
+    IFS="_"
+    
+    
+    # Since above we told the shell to use _ as separator, now we use the partido array and save it in a new array where it will now be
+    # split
+    partido_split=($(echo "${partido[@]}"))
+    
+    IFS="$old_ifs"
+    
+    # Here is the part where we make the substitution from Party Name to Candidate Name
+    # I could not figure out a better way to do it, so we cicle writing over the file
+    # 
+    for p in "${partido_split[@]}" ; do
+#    set -x    
+        awk 'BEGIN{OFS=FS="|"}
+        # The upper limit on the first "else if" needs to be reviewed on each
+        # election cycle, it is placed mainly to avoid pattern matches in the hashes field
+        FNR == 1 {
+        
+            for( x = 1 ; x <= NF ; x++ ){
+            
+                if( $x !~ /'"$p"'/ && x < NF){
+                
+                    printf("%s|", $x)
+                
+                }
+                else if( $x ~ /'"$p"'/ && x < NF){
+                
+                    $x='"\"$candidato\""'
+                    
+                    printf("%s|", $x)
+                
+                }
+                else if( x == NF){
+                
+                    printf("%s\n", $x)
+                    
+                }
+                
+            }
+        
+        }
+        ' "paso_03_headers" > ".build_headers_with_names"
+    
+    cp -f ".build_headers_with_names"  "paso_03_headers"
+    
+    done
+    
+  done
+    
+}
+
+
+# The Database file with the votes does not include the polling site location
+# this functions adds two columns to the end of the file, one colum is the
+# town, and other column is the place of the polling site within the town.
+function agregar_ubicacion_de_casilla(){
+   
+   awk 'BEGIN{
+       
+            FS="|"
+            OFS="|"
+       
+        }
+        
+        FNR == 1 {$1=$1; print $0}
+        
+        $7 ~ /1080/ && $9 ~ /[BC]/ { comunidad="Pánuco" ; lugar="Escuela Primaria 20 de Noviembre" ; print $0, comunidad, lugar}
+        
+        $7 ~ /1081/ && $9 ~ /B/ { comunidad="Llano Blanco Norte" ; lugar="Escuela Primaria Matías Ramos" ; print $0, comunidad, lugar}
+    
+        $7 ~ /1081/ && $9 ~ /E/ { comunidad="Llano Blanco Sur" ; lugar="Escuela Primaria Rural Federal Agustín Melgar" ; print $0, comunidad, lugar}
+    
+        $7 ~ /1082/ && $9 ~ /[BC]/ { comunidad="Laguna Seca" ; lugar="Escuela Primaria Miguel Auza" ; print $0, comunidad, lugar}
+        
+        $7 ~ /1083/ && $9 ~ /B/ { comunidad="San José de la Era" ; lugar="Escuela Primaria Emiliano Zapata" ; print $0, comunidad, lugar}
+        
+        $7 ~ /1084/ && $9 ~ /[BC]/ { comunidad="San Juan" ; lugar="Escuela Primaria 5 de Mayo" ; print $0, comunidad, lugar}
+    
+        $7 ~ /1085/ && $9 ~ /B/ { comunidad="La India" ; lugar="Escuela Primaria Mariano Matamoros" ; print $0, comunidad, lugar}
+    
+        $7 ~ /1086/ && $9 ~ /[BC]/ { comunidad="Pozo de Gamboa" ; lugar="Escuela Primaria Ignacio Zaragoza" ; print $0, comunidad, lugar}
+    
+        $7 ~ /1087/ && $9 ~ /[BC]/ { comunidad="Pozo de Gamboa" ; lugar="Unidad Básica de Rehabiliación" ; print $0, comunidad, lugar}
+   
+        $7 ~ /1087/ && $9 ~ /E/ { comunidad="Jesús María" ; lugar="Escuela Primaria Rural Federal Miguel Hidalgo" ; print $0, comunidad, lugar}
+        
+        $7 ~ /1088/ && $9 ~ /[BC]/ { comunidad="Pozo de Gamboa" ; lugar="COBAEZ" ; print $0, comunidad, lugar}
+        
+        $7 ~ /1089/ && $9 ~ /[BC]/ { comunidad="San Antonio del Ciprés" ; lugar="Escuela Primaria Federal 23 de Junio" ; print $0, comunidad, lugar}
+   
+        $7 ~ /1090/ && $9 ~ /[BC]/ { comunidad="San Antonio del Ciprés" ; lugar="Escuela Primaria Gabino Barreda" ; print $0, comunidad, lugar}
+   
+        $7 ~ /1091/ && $9 ~ /[BC]/ { comunidad="Casa de Cerros" ; lugar="Escuela Primaria Benito Juárez" ; print $0, comunidad, lugar}
+        
+        $7 ~ /1092/ && $9 ~ /B/ { comunidad="Muleros" ; lugar="Escuela Primaria Aquiles Serdán" ; print $0, comunidad, lugar}
+
+        $7 ~ /1093/ && $9 ~ /B/ { comunidad="Los Pozos" ; lugar="Escuela Primaria Tierra y Libertad" ; print $0, comunidad, lugar}
+
+   ' "$1"
+    
+}
+
+function filter_only_real_candidates(){
+    
+    cat "$1" |
+    
+    awk '
+    
+        BEGIN{
+            
+            FS=OFS="|"
+            
+        }
+        
+        FNR==1 {
+            
+            for( h=1 ; h <= NF ; h++){
+                
+                if( $h ~ /NOMINAL/ ){
+                    
+                    
+                    lista_nominal=h
+                    
+                    
+                }
+                
+            }
+            
+        }
+        
+        FNR==1 {
+            
+            
+            
+            for( columna=17 ; columna <= NF ; columna++){
+            
+            
+                if( $columna ~ /TOTAL_VOTOS/ ){
+                
+                    uc=(columna-1)
+                    
+                    break
+                }
+                    
+            
+            }
+            
+                       printf("%s|%s|%s|", $NF, $(NF-1), $lista_nominal ) ; 
+            
+            for( col=17 ; col <= uc ; col++){
+            
+                if( col < uc ){
+                
+                    printf("%s|", $col)
+                    
+                }
+                else{
+                    
+                    
+                    print $uc
+                    
+                    
+                }
+                
+            
+            } 
+        
+        }
+    FNR>=2{
+        
+                   printf("%s|%s|%s|", $NF, $(NF-1), $lista_nominal ) ; 
+            
+            for( col=17 ; col <= uc ; col++){
+            
+                if( col < uc ){
+                
+                    printf("%s|", $col)
+                    
+                }
+                else{
+                    
+                    
+                    print $uc
+                    
+                    
+                }
+                
+            
+            } 
+        
+        }
+    
+    '
+    
+    
+    
+}
+
+function porcentajes_por_pueblo(){
+
+    awk 'BEGIN{
+        
+            OFS=FS="|"
+        
+        }
+        
+        FNR==1{
+            
+            for( a=1 ; a <= NF ; a++){
+            
+                if( a < NF && a != 2 ){
+                
+                    printf("%s|", $a)
+                    
+                }
+                else{
+                
+                    if( a == NF && a != 2){
+                    
+                        print $a
+                        
+                    }
+                    
+                }
+                
+            }
+                
+        }
+        
+        FNR>1{
+            
+            for( k = 3 ; k <= NF ; k++){
+                
+                p+=$k
+                
+            }
+            
+            printf("%s|", $1 )
+            
+            if( p != 0 ){
+            
+                for( c=3 ; c <= NF ; c++ ){
+                
+            
+                
+                    $c=(($c/p)*100.00)
+                
+                    if( c < NF ){
+                
+                        printf("%s|", $c)
+                    
+                    }
+                    else{
+                
+                        printf("%s\n", $c)
+                    
+                    }
+                
+                
+                }
+           }  
+           else{
+               
+                for( y = 3 ; y <= NF ; y++ ){
+                    
+                    if( y < NF){
+                        
+                        printf("%s|", $y)
+                        
+                    }
+                    else{
+                        
+                        printf("%s\n", $y)
+                        
+                    }
+                    
+                }
+            
+            } 
+            p=0
+        }
+        ' "$1"
+    
+    
+    
+}
+
+
+function upload_files_to_github(){
+    set -x
+    
+    cd "/root/Election_2024_Data_Panuco_Zacatecas"
+    
+    git add .
+    
+    git commit -m "Database Creation: $fecha_reporte"
+    
+    git push "https://${git_token}@github.com/${git_username}/${git_name_repo}.git"
+    
+    cd "/root/Project_PREP/20210607_1905_PREP_ZAC/NewDir"
+
+    
+}
+
+
+
+function porcentaje_de_lista_nominal(){
+    
+    awk '
+    
+            BEGIN{
+            
+                OFS=FS="|"
+                
+            }
+            
+            
+            FNR == 1{
+            
+                print $1, "PARTICIPACIÓN CIUDADANA"
+                
+            }
+            
+            FNR>1 {
+                
+                printf("%s|", $1)
+                
+                for( i = 3 ; i <= NF ; i++ ){
+                
+                    d+=$i
+                
+                }
+                
+                porc_ciud=((d/$2)*100.)
+                
+                print porc_ciud
+                
+                d=0
+            }
+            
+            FNR>1{
+                
+                  for( g = 3 ; g <= NF ; g++ ){
+                
+                    votos_emitidos+=$g
+                    
+                }
+                
+                s+=$2
+            }
+            
+            END{
+            
+                printf("%s|%2.5f\n", "TODO EL MUNICIPIO", (votos_emitidos/13123)*(100.0) )
+                
+            }
+    
+        ' "$1"
+    
+    
+}    
+
+
+
+function porcentaje_de_votos_totales(){
+    
+    
+    awk '
+            BEGIN{
+            
+                OFS=FS="|"
+                
+        
+            }
+            
+            FNR == 1 {
+                
+                for( i = 3 ; i <= NF ; i++ ){
+                
+                    if( i < NF ){
+                        
+                        printf("%s|", $i)
+                        
+                    }
+                    else{
+                    
+                        print $i
+                        
+                    }
+                }
+            
+            }
+            
+            FNR > 1 {
+                
+                for( a = 3 ; a <= NF ; a++ ){
+                    
+                    votos_totales_candidato[a]+=$a
+                    
+                    totales+=$a
+                    
+                }
+                
+                
+                
+            }
+            
+            END{
+                
+                for( b = 3 ; b <= NF ; b++ ){
+                    
+                    if( b < NF ){
+                    
+                        printf("%s|", (votos_totales_candidato[b]/totales)*100.0)
+                        
+                    }
+                    else{
+                        
+                        printf("%s\n", (votos_totales_candidato[b]/totales)*100.0)
+                        
+                    }
+                    
+                } 
+                
+            }
+            
+        ' "$1"
+    
+    
+}
+
+
+
+function sumar_por_pueblo(){
+    
+    awk '
+    
+        BEGIN{
+            
+            
+            OFS=FS="|"
+            
+            PROCINFO["sorted_in"]="@ind_num_asc"
+            
+        }
+        
+        FNR==1{
+            
+            for( v = 2 ; v <= NF ; v++){
+                
+                if( v < NF ){
+                    
+                    printf("%s|", $v)
+                    
+                }
+                else{
+                    
+                    print $v
+                    
+                }
+                
+            }
+            
+            
+            
+        }
+        
+        FNR>1 {
+            
+            
+            
+            for( x = 3 ; x <= NF ; x++ ){
+                
+                pueblo[$2,x]+=$x
+                
+                number[x]=x
+                
+                comunidad[$2]=$2
+                
+            }
+            
+            
+        }
+        
+        END{
+            
+            for( z in comunidad){
+                
+                printf("%s|", comunidad[z])
+                
+                for( a in number ){
+                   
+                   if( a < NF ){
+                        
+                        printf("%s|",pueblo[z,a])
+                       
+                    }
+                    else{
+                        
+                            if( a == NF ){
+                        
+                                printf("%s\n", pueblo[z,a])
+                        
+                            }
+                    
+                    }
+                }
+            }   
+                
+                
+            
+            
+        }
+        
+    ' "$1"
+    
+    }
+
+# The Database file with the votes is a table with a lot of columns,
+# there may be columns where no information will be posted because
+# there is no candidate, those columns contain --- to indicate
+# not applicable, this function removes those columns
+function remover_columnas_sin_candidatos(){
+
+    # First we pickup or save the columns with the candidates, 
+    # the information saved into the array is like this: $2, $3, $4
+    useful_columns="$(awk 'BEGIN{
+        
+            OFS=FS="|"
+            
+    
+        }
+    
+        NR==2{
+        
+            for( columna=1 ; columna <= NF ; columna++){
+                
+                if( $columna != "---"  && columna < NF){
+                    
+                
+                    printf("$%s, ", columna)
+                    
+                    
+                }
+                else{
+                    
+                    if( $columna != "---" && columna == NF){
+                        
+                        printf("$%s\n", columna)
+                    }
+                }
+                
+                
+            }
+            
+        }
+    
+    ' $1)"
+    
+    # now we expand the array, if you notice, we expand the array for it
+    # to be interpreted by awk to print the columns
+    awk 'BEGIN{OFS=FS="|"}{print '"${useful_columns}"'}' "$1"
+    
+}
+
+
+
+function crear_titulos_con_fecha(){
+
+
+    printf "{\n\"title\": \"En Vivo | Elecciones Municipales 2024 | Pánuco, Zac. | Resultados Totales | Actualización: %s\"\n}" "$fecha_reporte" > "Resultados_Totales"
+    
+    printf "{\n\"title\": \"En Vivo | Elecciones Municipales 2024 | Pánuco, Zac. | Comunidades | Actualización: %s\"\n}" "$fecha_reporte" > "Resultados_Comunidades"
+    
+    printf "{\n\"title\": \"En Vivo | Elecciones Municipales 2024 | Pánuco, Zac. | Participación | Actualización: %s\"\n}" "$fecha_reporte" > "Participacion_Ciudadana"
+    
+    
+}
+
+
+function extract_data(){
+
+unzip -o ./*PREP_AYUN_ZAC.zip
+
+rm -f /root/Downloads/*PREP_ZAC.zip
+
+rm -f /root/Downloads/*PREP_DIP_LOC_ZAC.zip
+
+}
+
+# This function will download the database from the website using
+# a xvfb to create a 'virtual' display where chrome will be launched
+# and xdotool be used to navigate the website until the Download
+# button is clicked. Before runnig the script open chrome and 
+# choose a dowload folder of your liking
+function descarga_base_datos(){
+    #This probably should go at the begining for quicker access and reading
+    bd_url='https://prep.imagenzac.com.mx/ayuntamientos/entidad/votos-municipios'
+    
+    export DISPLAY=:1
+
+    Xvfb :1 -screen 0 1024x768x16 2>&1 &
+        
+    
+    /mnt/home/pets/chrome/opt/google/chrome/google-chrome --no-sandbox "${bd_url}" > /dev/null 2>&1 &
+    
+    sleep 5s
+    
+    xdotool key shift+End
+    
+    xdotool mousemove 243 758
+    
+    xdotool click 1
+    
+    sleep 2s
+    
+    xdotool mousemove 272 157
+    
+    sleep 3s 
+    
+    xdotool click 1
+    
+    sleep 2s
+    
+    xdotool mousemove 112 457
+    
+    sleep 2s
+    
+    xdotool click 1
+    
+    sleep 3s
+    
+    xdotool key ctrl+shift+w
+    
+    killall "Xvfb"
+    
+    
+}
+
+##################  START OF THE SCRIPT ###############################
+
+# First we need to get the database from the website
+descarga_base_datos
+
+# Unzip the database
+unzip -o /root/Downloads/*PREP_ZAC.zip -d /root/Downloads &&
+
+# Move the unzipped zip to the location of this script (this can be changed
+# to more appropiate places, perhaps even create variables at the begining)
+mv /root/Downloads/*AYUN_ZAC.zip /root/Project_PREP/20210607_1905_PREP_ZAC/NewDir &&
+
+# Extract the Database in the folder containig this script, three files
+# are extracted, LEEME.txt, ZAC_AYUN_2024.csv, and ZAC_AYUN_CANDIDATURAS_2024.csv
+extract_data &&
+
+
+#                         DOS2UNIX CLEANUP
+#
+# In case is a microsoft txt
+dos2unix "ZAC_AYUN_2024.csv" &> /dev/null
+
+#                 FECHA DE ELABORACION DEL REPORTE
+#
+# Date and time the Database was generated
+export fecha_reporte="$(awk 'FNR==2 {print $1, $2}' "ZAC_AYUN_2024.csv")"
+
+# Esta parte del codigo filtra las casillas de Panuco y agrega 
+# los headers, o encabezados: Comunidad y Lugar
+awk 'BEGIN{FS="," ; OFS="|"} FNR==7{ $1=$1 ; print $0, "COMUNIDAD", "LUGAR"} $0~/NUCO/{$1=$1; print $0}' "ZAC_AYUN_2024.csv" > "paso_01-Casillas_de_Panuco.csv"
+#set -x
+# Check if there is data about Panuco, remember this is Database that is updated through
+# the night after the polls close
+
+# count the number of lines, and save them
+hay_boletas="$(wc -l "paso_01-Casillas_de_Panuco.csv" | cut -d " " -f1)"
+
+# If there is only one line (the headers), there isn't any data 
+# on Panuco, but we still need to provide info to the www.datawrapper.de
+# charts, so we write files with 0 votes to serve as place holders
+if [[ $hay_boletas -eq 1 ]]; then
+#set -x
+    
+    printf "\
+COMUNIDAD|PARTICIPACIÓN CIUDADANA
+Casa de Cerros|0
+Jesús María|0
+La India|0
+Laguna Seca|0
+Llano Blanco Norte|0
+Llano Blanco Sur|0
+Los Pozos|0
+Muleros|0
+Pozo de Gamboa|0
+Pánuco|0
+San Antonio del Ciprés|0
+San José de la Era|0
+San Juan|0
+TODO EL MUNICIPIO|0
+" > "PorcentajeDeParticipacion.csv"
+
+printf "\
+COMUNIDAD|CANDIDATO 1|CANDIDATO 2|CANDIDATO 3|CANDIDATO 4
+Casa de Cerros|0|0|0|0
+Jesús María|0|0|0|0
+La India|0|0|0|0
+Laguna Seca|0|0|0|0
+Llano Blanco Norte|0|0|0|0
+Llano Blanco Sur|0|0|0|0
+Los Pozos|0|0|0|0
+Muleros|0|0|0|0
+Pozo de Gamboa|0|0|0|0
+PÃ¡nuco|0|0|0|0
+San Antonio del Ciprés|0|0|0|0
+San José de la Era|0|0|0|0
+San Juan|0|0|0|0
+" > "Votacion_de_Candidatos_por_Pueblo_porcentajes.csv"
+
+printf "\
+CANDIDATO 1|CANDIDATO 2|CANDIDATO 3|CANDIDATO 4
+0|0|0|0
+" > "Votos_Totales_Municipio.csv"
+    
+    
+    crear_titulos_con_fecha
+    
+    cp --force "Votos_Totales_Municipio.csv" "PorcentajeDeParticipacion.csv" "Votacion_de_Candidatos_por_Pueblo_porcentajes.csv" "Resultados_Totales" "Resultados_Comunidades" "Participacion_Ciudadana" "/root/Election_2024_Data_Panuco_Zacatecas"
+    
+    upload_files_to_github &&
+    
+    exit 0
+
+fi
+
+# Esta funcion agrega la comunidad y lugar a cada fila, y crea dos copias del archivo
+agregar_ubicacion_de_casilla "paso_01-Casillas_de_Panuco.csv" > "paso_02-Casillas_Con_Localidad.csv"
+
+
+# Funcion con filtro para quitar candidaturas que no existen basado
+# unicamente en encontrar la secuencia de caracteres --- ,
+remover_columnas_sin_candidatos "paso_02-Casillas_Con_Localidad.csv" > "paso_03_Candidaturas_Reales.csv"
+
+# create a copy of the file created in the instruction above
+cp "paso_03_Candidaturas_Reales.csv" "paso_03_headers"
+
+# We use the copied file above to replace the parties
+# names with the names of the candidates, for this process
+# we are going to use a second file included in the database, called 
+# ZAC_AYUN_CANDIDATURAS_2024.csv
+agregar_nombre_de_candidatos "ZAC_AYUN_CANDIDATURAS_2024.csv"
+
+# With the names of the candidates in place, now we can create a file/table
+# with the data for Panuco.
+# Crear el archivo o tabla con los encabezados o headers ya con el nombre
+# del candidato, en vez del partido
+# first we use the newly header created, then with tail we append the voting data
+cat "paso_03_headers" > "paso_04_Tabla_Final_Candidatos_de_Panuco.csv"
+tail -n+2 "paso_03_Candidaturas_Reales.csv" >> "paso_04_Tabla_Final_Candidatos_de_Panuco.csv"
+
+
+# Remover todas las columnas que no contienen votos, o  el lugar de
+# las votaciones
+filter_only_real_candidates "paso_04_Tabla_Final_Candidatos_de_Panuco.csv" > "Votacion_de_Candidatos_de_Panuco_Por_Casilla.csv"
+
+# There may be columns with strings instead of number of votes, the strings are usually to indicate some
+# sort of problem with the information at the polling site, for our purposes, it is the same as 0 votes
+# we replace the strings with 000
+# Reemplazar celdas que tienen Sin Dato o Ilegible con  000
+sed -i 's/---\|Sin Dato\|Ilegible/000/g' "Votacion_de_Candidatos_de_Panuco_Por_Casilla.csv"
+
+# We consolidate the columns containing votes for the same candidate into one,
+# I dont really understand how to .awk code works, I could not figure out 
+# how to perform the sum, so I used an aswer from stackoverflow
+awk -f "./sum_cols.awk" "Votacion_de_Candidatos_de_Panuco_Por_Casilla.csv" > "Votacion_de_Candidatos_de_Panuco_Por_Casilla_02.csv"
+
+# With the votes consolidated , now we have to add the votes by town, because the data is 
+# presented by polling site
+sumar_por_pueblo "Votacion_de_Candidatos_de_Panuco_Por_Casilla_02.csv" > "Votacion_de_Candidatos_por_Pueblo.csv"
+
+# Now we find the candidates' share of the vote
+porcentajes_por_pueblo "Votacion_de_Candidatos_por_Pueblo.csv" > "Votacion_de_Candidatos_por_Pueblo_porcentajes.csv"
+
+porcentaje_de_lista_nominal "Votacion_de_Candidatos_por_Pueblo.csv" > "PorcentajeDeParticipacion.csv"
+
+porcentaje_de_votos_totales "Votacion_de_Candidatos_por_Pueblo.csv" > "Votos_Totales_Municipio.csv"
+
+# We write a file in json format that updates the datawrapper chart's table with the
+# database creation time and date
+crear_titulos_con_fecha
+
+# We copy the files with the data tables, and titles to the filder with where
+# we created the git local repo
+cp --force "Votos_Totales_Municipio.csv" "PorcentajeDeParticipacion.csv" "Votacion_de_Candidatos_por_Pueblo_porcentajes.csv" "Resultados_Totales" "Resultados_Comunidades" "Participacion_Ciudadana" "/root/Election_2024_Data_Panuco_Zacatecas"
+
+# Finally we update the data to github website, where it is read by
+# datawrapper each minute
+# The script was running in an infinite loop the night of the election, and the 
+# data was updated constantly
+upload_files_to_github &&
+
+echo ""
+
+
+
+exit 0
