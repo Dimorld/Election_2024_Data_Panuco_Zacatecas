@@ -1,10 +1,10 @@
 #! /usr/bin/env bash
 #
-#   Live Vote Count Chart, using Mexico's PREP Data,
+#   Live Vote Count Charts, using Mexico's PREP Data,
 #   for the municipal election in Panuco, Zacatecas, Mexico.
 #
 #
-#   Last used: 20240603
+#   Last time used succesfully: 20240609
 #   
 #
 #   The script uses:
@@ -17,38 +17,98 @@
 #      unzip
 #      Xorg Server
 #
-#   The script was executed in Puppy Linux FOSSA
+#   The script was executed in PUPPY LINUX FOSSA OS
 #
-#   What does it do?
+#   WHAT DOES IT DO?
 #
-#       The script downloads the live voting count database for the municipalities in the
-#       Mexican state of Zacatecas, from the database, it extracts the votes
+#       The script downloads the live voting aggregate database for the 
+#       municipalities in the Mexican state of Zacatecas, then it extracts the votes
 #       for the Panuco, Zacatecas Municipality, and performs the mathematics 
 #       required to get the total vote count, the voter turn out, and
-#       the vote count by polling place. Finally, since, the database uses numeric
-#       codes to identify the polling places, this script replaces the 
-#       numeric codes with the names of the towns, also, it replaces the
-#       parties names with the name of the candidates. Once the operations
-#       are performed, the newly calculated data is uploaded in the form of
-#       archives to a github repo, where it is then read by a chart previously
-#       creted in www.datawrapper.de
+#       the vote count by polling place. The database uses numeric
+#       codes to identify the polling sites, so the script replaces the 
+#       numeric codes with the names of the towns, it also replaces the
+#       parties names with the name of the candidates. Once the math and
+#       string replacements are performed, the new data is uploaded in the form of
+#       csv and text files to a github repo, where it is then read by a chart previously
+#       created in www.datawrapper.de
+#
+#
+#   HOW DOES IT WORK?
+#
+#       There are serveral things you need to do before executing the script,
+#
+#           1) Create a github repo to upload the files created by the script
+#               a) create a token, we'll needed to upload our files to
+#                  the repo
+#               b) Prepare the local repo so that the only thing left to
+#                  do when the script is executed is to update and push,
+#                  take a look at the function called upload_files_to_github
+#           2) Create three charts, and format to your liking in https://dawrapper.de
+#               a) The three charts are multiple donuts, Table
+#                  and Donut
+#                        -Multiple Donuts: Candidates share of the vote by town
+#                        -Table: Voters turnout in each town
+#                        -Donut: Candidates total share of the vote in the Municipality
+#               b) The data for the charts is read from the github repo,
+#                  read the www.datawrapper.de documentation to learn how to do it.
+#           3) In the Chrome Browser, set your prefered Download location
+#           4) Go to the website where the Database is located at, then
+#              explore and learn the actions needed to reach and
+#              click the download button (it may change for each election cycle)
+#              and adapt the function called descarga_base_datos accordingly
+#                a) Download the Database, unzip it and explore the files created
+#                b) It is a good habit to explore the files, in case somethig
+#                   does not work you'll be able to debug faster
+#           5) Fill the variables info below, and provide the route to
+#              the text file with your github login credentials
+#           6) Run the script, and pray, if it works you are done almost done
+#           7) During the night of the election, run the script in an infinite while loop:
+#              while true ; do ./this_script ; sleep 10m ; done
+#              Now you should have three live charts available to share online
 #
 #                             DEBUGGING
 
 trap 'on_error ; printf "\n" ; s=$?; echo >&2 "$0: Exit code on line "$LINENO": $BASH_COMMAND" ; exit $s ;' ERR
+set -eou pipefail
+
 
 trap 'cleanup' EXIT
 
-# login for datawrapper credentials, which at the end were not needed
-source /root/datawrapper
+# login credentials to datawrapper, which at the end are not needed
+#source /root/datawrapper
 
-# login credentials to github
-source /root/git_election_credentials
 
-set -eou pipefail
-#set -x
+#                       VARIABLES
 
+
+# login credentials to github, you need to provide the route
+# to the file where you saved your login credentials,
+# the content in the file must be:
+#   git_token=YOUR_TOKEN
+#   git_username=YOUR_GITHUB_USERNAME
+#   git_name_repo=THE_NAME_OF_YOUR_REPO
+source /root/credentials.git
+# language
 export LC_ALL=es_MX.utf8
+
+# Chrome's Download Directory
+browser_download_dir="/root/Downloads"
+
+# This script's location
+working_dir="$(pwd)"
+
+# The file with the vote count aggregate, usually ZAC_AYUN_YEAROFELECTION.csv
+vote_count_file="ZAC_AYUN_2024.csv"
+
+# The file with the party and candidate information, usually ZAC_AYUN_CANDIDATURAS_YEAROFELECTION.csv
+candidates_name_file="ZAC_AYUN_CANDIDATURAS_2024.csv"
+
+# The local repo location
+github_dir="/root/Election_2024_Data_Panuco_Zacatecas"
+
+# The url where the database is hosted at, it may change for each election cycle
+bd_url='https://prep.imagenzac.com.mx/ayuntamientos/entidad/votos-municipios'
 
 # remove files at exit
 function cleanup(){
@@ -70,13 +130,13 @@ function on_error(){
 }
 
 
-# The file with the votes does not include the names of the candidates, only the stings of
-# names of the parties, this function replaces the party strings with
-# candidates.
+# The Database file with the vote count does not include the names of the candidates, only the
+# names of the parties, this function replaces the parties' strings with
+# candidates names.
 # 
 function agregar_nombre_de_candidatos(){
 # The Database includes three files, one of those files is a list of the
-# candidates with the party, and municipality they represent, this line
+# candidates names with the party, and municipality they represent, the following line of code
 # uses that file to extract the candidates for the municipality of Panuco,
 # the 32 represents the state of Zacatecas, and the 38 the municipality of
 # Panuco.
@@ -85,7 +145,7 @@ function agregar_nombre_de_candidatos(){
 # We count the number of candidates 
   numero_de_candidatos="$(wc --lines "candidaturas_mun.csv" | cut -d " " -f1)"
 
-# The two nested for loops replace the parties' names with the names of the candidates
+# The two nested for loops replace the parties' names with the names of the candidates in the headers
 #    
   for linea in $(seq 1 "$numero_de_candidatos") ; do
     # We extract and save the candidates' names into the array
@@ -396,9 +456,8 @@ function porcentajes_por_pueblo(){
 
 
 function upload_files_to_github(){
-    set -x
     
-    cd "/root/Election_2024_Data_Panuco_Zacatecas"
+    cd "$github_dir"
     
     git add .
     
@@ -406,8 +465,8 @@ function upload_files_to_github(){
     
     git push "https://${git_token}@github.com/${git_username}/${git_name_repo}.git"
     
-    cd "/root/Project_PREP/20210607_1905_PREP_ZAC/NewDir"
-
+    cd "$working_dir"
+    
     
 }
 
@@ -691,9 +750,9 @@ function extract_data(){
 
 unzip -o ./*PREP_AYUN_ZAC.zip
 
-rm -f /root/Downloads/*PREP_ZAC.zip
+rm -f "$browser_download_dir"/*PREP_ZAC.zip
 
-rm -f /root/Downloads/*PREP_DIP_LOC_ZAC.zip
+rm -f "$browser_download_dir"/*PREP_DIP_LOC_ZAC.zip
 
 }
 
@@ -704,16 +763,15 @@ rm -f /root/Downloads/*PREP_DIP_LOC_ZAC.zip
 # choose a dowload folder of your liking
 function descarga_base_datos(){
     #This probably should go at the begining for quicker access and reading
-    bd_url='https://prep.imagenzac.com.mx/ayuntamientos/entidad/votos-municipios'
-    
+
     export DISPLAY=:1
 
     Xvfb :1 -screen 0 1024x768x16 2>&1 &
         
     
-    /mnt/home/pets/chrome/opt/google/chrome/google-chrome --no-sandbox "${bd_url}" > /dev/null 2>&1 &
+    chrome --no-sandbox "${bd_url}" > /dev/null 2>&1 &
     
-    sleep 5s
+    sleep 10s
     
     xdotool key shift+End
     
@@ -721,23 +779,23 @@ function descarga_base_datos(){
     
     xdotool click 1
     
-    sleep 2s
+    sleep 3s
     
     xdotool mousemove 272 157
     
-    sleep 3s 
-    
-    xdotool click 1
-    
-    sleep 2s
-    
-    xdotool mousemove 112 457
-    
-    sleep 2s
+    sleep 4s 
     
     xdotool click 1
     
     sleep 3s
+    
+    xdotool mousemove 112 457
+    
+    sleep 3s
+    
+    xdotool click 1
+    
+    sleep 4s
     
     xdotool key ctrl+shift+w
     
@@ -752,30 +810,30 @@ function descarga_base_datos(){
 descarga_base_datos
 
 # Unzip the database
-unzip -o /root/Downloads/*PREP_ZAC.zip -d /root/Downloads &&
+unzip -o "$browser_download_dir"/*PREP_ZAC.zip -d "$browser_download_dir" &&
 
 # Move the unzipped zip to the location of this script (this can be changed
 # to more appropiate places, perhaps even create variables at the begining)
-mv /root/Downloads/*AYUN_ZAC.zip /root/Project_PREP/20210607_1905_PREP_ZAC/NewDir &&
+mv "$browser_download_dir"/*AYUN_ZAC.zip "$working_dir" &&
 
 # Extract the Database in the folder containig this script, three files
-# are extracted, LEEME.txt, ZAC_AYUN_2024.csv, and ZAC_AYUN_CANDIDATURAS_2024.csv
+# are extracted, LEEME.txt, ZAC_AYUN_2024.csv, and ZAC_AYUN_CANDID_2024.csv
 extract_data &&
 
 
 #                         DOS2UNIX CLEANUP
 #
 # In case is a microsoft txt
-dos2unix "ZAC_AYUN_2024.csv" &> /dev/null
+dos2unix "$vote_count_file" &> /dev/null
 
 #                 FECHA DE ELABORACION DEL REPORTE
 #
 # Date and time the Database was generated
-export fecha_reporte="$(awk 'FNR==2 {print $1, $2}' "ZAC_AYUN_2024.csv")"
+export fecha_reporte="$(awk 'FNR==2 {print $1, $2}' "$vote_count_file")"
 
 # Esta parte del codigo filtra las casillas de Panuco y agrega 
 # los headers, o encabezados: Comunidad y Lugar
-awk 'BEGIN{FS="," ; OFS="|"} FNR==7{ $1=$1 ; print $0, "COMUNIDAD", "LUGAR"} $0~/NUCO/{$1=$1; print $0}' "ZAC_AYUN_2024.csv" > "paso_01-Casillas_de_Panuco.csv"
+awk 'BEGIN{FS="," ; OFS="|"} FNR==7{ $1=$1 ; print $0, "COMUNIDAD", "LUGAR"} $0~/NUCO/{$1=$1; print $0}' "$vote_count_file" > "paso_01-Casillas_de_Panuco.csv"
 #set -x
 # Check if there is data about Panuco, remember this is Database that is updated through
 # the night after the polls close
@@ -832,7 +890,7 @@ CANDIDATO 1|CANDIDATO 2|CANDIDATO 3|CANDIDATO 4
     
     crear_titulos_con_fecha
     
-    cp --force "Votos_Totales_Municipio.csv" "PorcentajeDeParticipacion.csv" "Votacion_de_Candidatos_por_Pueblo_porcentajes.csv" "Resultados_Totales" "Resultados_Comunidades" "Participacion_Ciudadana" "/root/Election_2024_Data_Panuco_Zacatecas"
+    cp --force "Votos_Totales_Municipio.csv" "PorcentajeDeParticipacion.csv" "Votacion_de_Candidatos_por_Pueblo_porcentajes.csv" "Resultados_Totales" "Resultados_Comunidades" "Participacion_Ciudadana" "$github_dir"
     
     upload_files_to_github &&
     
@@ -854,8 +912,8 @@ cp "paso_03_Candidaturas_Reales.csv" "paso_03_headers"
 # We use the copied file above to replace the parties
 # names with the names of the candidates, for this process
 # we are going to use a second file included in the database, called 
-# ZAC_AYUN_CANDIDATURAS_2024.csv
-agregar_nombre_de_candidatos "ZAC_AYUN_CANDIDATURAS_2024.csv"
+# ZAC_AYUN_CANDIDA_2024.csv
+agregar_nombre_de_candidatos "$candidates_name_file"
 
 # With the names of the candidates in place, now we can create a file/table
 # with the data for Panuco.
@@ -898,9 +956,9 @@ crear_titulos_con_fecha
 
 # We copy the files with the data tables, and titles to the filder with where
 # we created the git local repo
-cp --force "Votos_Totales_Municipio.csv" "PorcentajeDeParticipacion.csv" "Votacion_de_Candidatos_por_Pueblo_porcentajes.csv" "Resultados_Totales" "Resultados_Comunidades" "Participacion_Ciudadana" "/root/Election_2024_Data_Panuco_Zacatecas"
+cp --force "Votos_Totales_Municipio.csv" "PorcentajeDeParticipacion.csv" "Votacion_de_Candidatos_por_Pueblo_porcentajes.csv" "Resultados_Totales" "Resultados_Comunidades" "Participacion_Ciudadana" "$github_dir"
 
-# Finally we update the data to github website, where it is read by
+# Finally we update the data to the github website, where it is read by
 # datawrapper each minute
 # The script was running in an infinite loop the night of the election, and the 
 # data was updated constantly
